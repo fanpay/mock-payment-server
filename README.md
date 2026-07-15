@@ -17,3 +17,7 @@ pip install -r requirements.txt
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 4010
 ```
+
+## Despliegue en Netlify
+
+El proyecto incluye una función Python en `netlify/functions/mock_payment_server.py` y un redirect en `netlify.toml` para que Netlify envíe todas las rutas a esa función.
