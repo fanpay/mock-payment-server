@@ -1,8 +1,12 @@
 [build]
   functions = "netlify/functions"
-  publish = "."
+  publish = "public"
+
+[build.environment]
+  PYTHON_VERSION = "3.11"
 
 [[redirects]]
   from = "/*"
   to = "/.netlify/functions/mock_payment_server"
   status = 200
+  force = true
