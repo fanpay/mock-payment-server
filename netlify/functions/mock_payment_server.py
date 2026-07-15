@@ -6,13 +6,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "partnerToken, requestId, Content-Type",
+}
+
+
 def _json_response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "statusCode": status_code,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-        },
+        "headers": {"Content-Type": "application/json", **_CORS_HEADERS},
         "body": json.dumps(payload),
         "isBase64Encoded": False,
     }
@@ -261,6 +265,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     headers = event.get("headers")
     partner_token = _header_value(headers, "partnerToken")
     request_id = _header_value(headers, "requestId")
+
+    if method == "OPTIONS":
+        return {"statusCode": 200, "headers": _CORS_HEADERS, "body": ""}
 
     try:
         _validate_headers(partner_token, request_id)
