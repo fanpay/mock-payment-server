@@ -1,14 +1,30 @@
 from typing import Any
 from uuid import UUID, uuid4
+import os
+from datetime import datetime, timedelta
 
+import jwt
 import uvicorn
-from fastapi import Body, FastAPI, Header, Request
+from fastapi import Body, FastAPI, Header, Request, Form
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 app = FastAPI()
+
+# JWT secret for demo tokens (override with env var in production)
+_JWT_SECRET = os.getenv("MOCK_AUTH_SECRET", "dev-secret-change-me")
+_JWT_ALGORITHM = "HS256"
+
+# Allow Authorization header for browser-based Try-it flows
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "partnerToken", "requestId", "Content-Type"],
+)
 
 
 class APIError(Exception):
@@ -48,6 +64,39 @@ def _validate_headers(partner_token: str | None, request_id: str | None) -> str 
             "requestId header must be a valid UUID",
         )
     return request_id
+
+
+def _create_jwt(sub: str, expires_in: int = 3600) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": sub,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=expires_in)).timestamp()),
+    }
+    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+
+def _verify_jwt_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise APIError(401, "TOKEN_EXPIRED", "Access token has expired")
+    except jwt.InvalidTokenError:
+        raise APIError(401, "INVALID_TOKEN", "Access token is invalid")
+
+
+def _validate_auth(partner_token: str | None, authorization: str | None, request_id: str | None) -> str | None:
+    # If Authorization header provided, accept Bearer JWT tokens instead of partnerToken
+    if authorization:
+        if not authorization.lower().startswith("bearer "):
+            raise APIError(401, "INVALID_TOKEN", "Authorization header must be a Bearer token")
+        token = authorization.split(None, 1)[1]
+        _verify_jwt_token(token)
+        if request_id is not None and not _is_valid_uuid4(request_id):
+            raise APIError(400, "INVALID_HEADER", "requestId header must be a valid UUID")
+        return request_id
+    # fallback to original header validation
+    return _validate_headers(partner_token, request_id)
 
 
 CUSTOMERS_RESPONSE = [
@@ -213,8 +262,9 @@ async def not_found_handler(_: Request, exc: StarletteHTTPException):
 async def get_customers(
     partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
+    authorization: str | None = Header(None, alias="Authorization"),
 ):
-    _validate_headers(partner_token, request_id)
+    _validate_auth(partner_token, authorization, request_id)
     return JSONResponse(content=CUSTOMERS_RESPONSE)
 
 
@@ -222,8 +272,9 @@ async def get_customers(
 async def get_devices(
     partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
+    authorization: str | None = Header(None, alias="Authorization"),
 ):
-    _validate_headers(partner_token, request_id)
+    _validate_auth(partner_token, authorization, request_id)
     return JSONResponse(content=DEVICES_RESPONSE)
 
 
@@ -232,8 +283,9 @@ async def post_payments(
     payload: dict[str, Any] = Body(...),
     partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
+    authorization: str | None = Header(None, alias="Authorization"),
 ):
-    request_id = _validate_headers(partner_token, request_id)
+    request_id = _validate_auth(partner_token, authorization, request_id)
 
     payment_type = payload.get("paymentType")
     if payment_type is None:
@@ -276,6 +328,23 @@ async def post_payments(
         "customData": [],
     }
     return JSONResponse(content=response_body)
+
+
+@app.post("/dpp/v1/auth/token")
+async def auth_token(request: Request, client_id: str | None = Form(None), client_secret: str | None = Form(None), body: dict | None = Body(None)):
+    # Accept both form-encoded (OAuth2) and JSON bodies for demo client-credentials
+    data = {}
+    if client_id or client_secret:
+        data["clientId"] = client_id
+        data["clientSecret"] = client_secret
+    if body:
+        data.update(body)
+    client_id = data.get("clientId") or data.get("client_id")
+    client_secret = data.get("clientSecret") or data.get("client_secret")
+    if client_id != "demo-client" or client_secret != "demo-secret":
+        raise APIError(401, "INVALID_CLIENT", "Invalid client credentials")
+    token = _create_jwt(client_id)
+    return JSONResponse(content={"access_token": token, "token_type": "bearer", "expires_in": 3600})
 
 
 if __name__ == "__main__":

@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import Any
 from uuid import UUID, uuid4
+from datetime import datetime, timedelta
 
+import jwt
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "partnerToken, requestId, Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, partnerToken, requestId, Content-Type",
 }
+
+# JWT secret (override with env var in production)
+_JWT_SECRET = os.getenv("MOCK_AUTH_SECRET", "dev-secret-change-me")
+_JWT_ALGORITHM = "HS256"
 
 
 def _json_response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -206,9 +213,24 @@ def _parse_body(event: dict[str, Any]) -> dict[str, Any]:
         return {}
     if event.get("isBase64Encoded"):
         body = base64.b64decode(body).decode("utf-8")
+    # If content-type is form encoded, parse into dict
+    headers = event.get("headers") or {}
+    content_type = _header_value(headers, "content-type") or ""
     if isinstance(body, dict):
         return body
-    return json.loads(body)
+    if "application/x-www-form-urlencoded" in content_type:
+        try:
+            from urllib.parse import parse_qs
+
+            parsed = parse_qs(body)
+            # parse_qs returns lists for each value
+            return {k: v[0] if isinstance(v, list) and v else v for k, v in parsed.items()}
+        except Exception:
+            return {}
+    try:
+        return json.loads(body)
+    except Exception:
+        return {}
 
 
 def _create_payment_response(payload: dict[str, Any], request_id: str | None) -> dict[str, Any]:
@@ -253,6 +275,23 @@ def _create_payment_response(payload: dict[str, Any], request_id: str | None) ->
         "customData": [],
     }
 
+def _create_jwt(sub: str, expires_in: int = 3600) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": sub,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=expires_in)).timestamp()),
+    }
+    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+def _verify_jwt(token: str) -> dict | None:
+    try:
+        return jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        return {"error": _error_response(401, "TOKEN_EXPIRED", "Access token has expired")}
+    except jwt.InvalidTokenError:
+        return {"error": _error_response(401, "INVALID_TOKEN", "Access token is invalid")}
+
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     del context
@@ -265,12 +304,35 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     headers = event.get("headers")
     partner_token = _header_value(headers, "partnerToken")
     request_id = _header_value(headers, "requestId")
+    authorization = _header_value(headers, "Authorization")
 
     if method == "OPTIONS":
         return {"statusCode": 200, "headers": _CORS_HEADERS, "body": ""}
 
     try:
-        _validate_headers(partner_token, request_id)
+        # If Authorization Bearer token is present, validate it. Otherwise require partnerToken header.
+        if authorization:
+            if not str(authorization).lower().startswith("bearer "):
+                return _error_response(401, "INVALID_TOKEN", "Authorization header must be a Bearer token")
+            token = str(authorization).split(None, 1)[1]
+            verify_result = _verify_jwt(token)
+            if isinstance(verify_result, dict) and verify_result.get("error"):
+                return verify_result["error"]
+        else:
+            _validate_headers(partner_token, request_id)
+
+        # Token issuance endpoint (client credentials demo)
+        if method == "POST" and path == "/dpp/v1/auth/token":
+            try:
+                body = _parse_body(event)
+            except json.JSONDecodeError:
+                return _error_response(400, "INVALID_REQUEST", "Request body is invalid")
+            client_id = body.get("clientId") or body.get("client_id")
+            client_secret = body.get("clientSecret") or body.get("client_secret")
+            if client_id != "demo-client" or client_secret != "demo-secret":
+                return _error_response(401, "INVALID_CLIENT", "Invalid client credentials")
+            token = _create_jwt(client_id)
+            return _json_response(200, {"access_token": token, "token_type": "bearer", "expires_in": 3600})
 
         if method == "GET" and path == "/dpp/v1/customers":
             return _json_response(200, CUSTOMERS_RESPONSE)

@@ -1,0 +1,110 @@
+openapi: 3.0.3
+info:
+  title: Mock Payment Server API
+  version: 1.0.0
+  description: Demo OpenAPI for the mock payment server. Includes OAuth2 client-credentials flow for Try It.
+servers:
+  - url: http://localhost:4010
+    description: Local development server (change in Redocly to your deployed URL)
+paths:
+  /dpp/v1/auth/token:
+    post:
+      summary: Issue an access token (client credentials)
+      description: Accepts JSON or form-encoded client credentials and returns a JWT access token for demo.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                clientId:
+                  type: string
+                clientSecret:
+                  type: string
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                client_id:
+                  type: string
+                client_secret:
+                  type: string
+        required: true
+      responses:
+        '200':
+          description: Access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  token_type:
+                    type: string
+                  expires_in:
+                    type: integer
+  /dpp/v1/customers:
+    get:
+      summary: List customers
+      security:
+        - oauth2: []
+      responses:
+        '200':
+          description: A list of customers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /dpp/v1/emv/devices:
+    get:
+      summary: List devices
+      security:
+        - oauth2: []
+      responses:
+        '200':
+          description: Devices
+          content:
+            application/json:
+              schema:
+                type: object
+  /dpp/v1/payments:
+    post:
+      summary: Create a payment
+      security:
+        - oauth2: ["payments:write"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paymentType:
+                  type: string
+                amount:
+                  type: object
+                  properties:
+                    amount:
+                      type: number
+      responses:
+        '200':
+          description: Payment response
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: http://localhost:4010/dpp/v1/auth/token
+          scopes:
+            payments:write: Create payments
+
+security:
+  - oauth2: []
