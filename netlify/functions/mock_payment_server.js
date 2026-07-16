@@ -1,10 +1,13 @@
-const { randomUUID } = require("crypto");
+const { createHmac, randomUUID } = require("crypto");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "partnerToken, requestId, Content-Type",
+  "Access-Control-Allow-Headers": "Authorization, partnerToken, requestId, Content-Type",
 };
+
+const JWT_SECRET = process.env.MOCK_AUTH_SECRET || "dev-secret-change-me";
+const JWT_ALGORITHM = "HS256";
 
 function jsonResponse(statusCode, payload) {
   return {
@@ -18,6 +21,74 @@ function errorResponse(statusCode, code, message) {
   return jsonResponse(statusCode, { errors: [{ code, message }] });
 }
 
+function base64UrlEncode(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function base64UrlDecode(input) {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((input.length + 3) % 4);
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function createJwt(sub, expiresInSeconds = 3600) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: JWT_ALGORITHM, typ: "JWT" };
+  const payload = {
+    sub,
+    iat: now,
+    exp: now + expiresInSeconds,
+  };
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = createHmac("sha256", JWT_SECRET).update(signingInput).digest("base64");
+  const encodedSignature = signature.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return `${signingInput}.${encodedSignature}`;
+}
+
+function verifyJwt(token) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) {
+    return { valid: false, error: errorResponse(401, "INVALID_TOKEN", "Access token is invalid") };
+  }
+
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  let header;
+  let payload;
+
+  try {
+    header = JSON.parse(base64UrlDecode(encodedHeader));
+    payload = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return { valid: false, error: errorResponse(401, "INVALID_TOKEN", "Access token is invalid") };
+  }
+
+  if (header.alg !== JWT_ALGORITHM) {
+    return { valid: false, error: errorResponse(401, "INVALID_TOKEN", "Access token is invalid") };
+  }
+
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const expectedSignature = createHmac("sha256", JWT_SECRET).update(signingInput).digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+
+  if (encodedSignature !== expectedSignature) {
+    return { valid: false, error: errorResponse(401, "INVALID_TOKEN", "Access token is invalid") };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp === "number" && payload.exp < now) {
+    return { valid: false, error: errorResponse(401, "TOKEN_EXPIRED", "Access token has expired") };
+  }
+
+  return { valid: true, payload };
+}
+
 function isValidUUID4(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -29,6 +100,33 @@ function getHeader(headers, name) {
   return key ? headers[key] : null;
 }
 
+function parseBody(event) {
+  if (!event.body) return {};
+
+  let body = event.body;
+  if (event.isBase64Encoded) {
+    body = Buffer.from(body, "base64").toString("utf8");
+  }
+
+  const headers = event.headers || {};
+  const contentType = String(getHeader(headers, "content-type") || "").toLowerCase();
+
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const params = new URLSearchParams(body);
+    return Object.fromEntries(params.entries());
+  }
+
+  if (typeof body === "object") {
+    return body;
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    return {};
+  }
+}
+
 function validateHeaders(partnerToken, requestId) {
   if (!partnerToken || !isValidUUID4(partnerToken)) {
     return errorResponse(400, "MISSING_REQUIRED_HEADER", "partnerToken header is required and must be a valid UUID");
@@ -37,6 +135,23 @@ function validateHeaders(partnerToken, requestId) {
     return errorResponse(400, "INVALID_HEADER", "requestId header must be a valid UUID");
   }
   return null;
+}
+
+function validateAuth(partnerToken, authorization, requestId) {
+  if (authorization) {
+    if (!String(authorization).toLowerCase().startsWith("bearer ")) {
+      return errorResponse(401, "INVALID_TOKEN", "Authorization header must be a Bearer token");
+    }
+    const token = String(authorization).split(/\s+/, 2)[1];
+    const verification = verifyJwt(token);
+    if (!verification.valid) return verification.error;
+    if (requestId !== null && requestId !== undefined && !isValidUUID4(requestId)) {
+      return errorResponse(400, "INVALID_HEADER", "requestId header must be a valid UUID");
+    }
+    return null;
+  }
+
+  return validateHeaders(partnerToken, requestId);
 }
 
 const CUSTOMERS_RESPONSE = [
@@ -198,9 +313,26 @@ exports.handler = async (event) => {
   const headers = event.headers || {};
   const partnerToken = getHeader(headers, "partnerToken");
   const requestId = getHeader(headers, "requestId");
+  const authorization = getHeader(headers, "Authorization");
 
-  const headerError = validateHeaders(partnerToken, requestId);
-  if (headerError) return headerError;
+  if (method === "POST" && path === "/dpp/v1/auth/token") {
+    const body = parseBody(event);
+    const clientId = body.clientId || body.client_id;
+    const clientSecret = body.clientSecret || body.client_secret;
+
+    if (clientId !== "demo-client" || clientSecret !== "demo-secret") {
+      return errorResponse(401, "INVALID_CLIENT", "Invalid client credentials");
+    }
+
+    return jsonResponse(200, {
+      access_token: createJwt(clientId),
+      token_type: "bearer",
+      expires_in: 3600,
+    });
+  }
+
+  const authError = validateAuth(partnerToken, authorization, requestId);
+  if (authError) return authError;
 
   if (method === "GET" && path === "/dpp/v1/customers") {
     return jsonResponse(200, CUSTOMERS_RESPONSE);
@@ -211,12 +343,7 @@ exports.handler = async (event) => {
   }
 
   if (method === "POST" && path === "/dpp/v1/payments") {
-    let body = {};
-    try {
-      body = event.body ? JSON.parse(event.body) : {};
-    } catch {
-      return errorResponse(400, "INVALID_REQUEST", "Request body is invalid");
-    }
+    const body = parseBody(event);
     return handlePayments(body, requestId);
   }
 
