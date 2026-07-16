@@ -3,7 +3,7 @@ const { createHmac, randomUUID } = require("crypto");
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, partnerToken, requestId, Content-Type",
+  "Access-Control-Allow-Headers": "Authorization, requestId, Content-Type",
 };
 
 const JWT_SECRET = process.env.MOCK_AUTH_SECRET || "dev-secret-change-me";
@@ -127,31 +127,27 @@ function parseBody(event) {
   }
 }
 
-function validateHeaders(partnerToken, requestId) {
-  if (!partnerToken || !isValidUUID4(partnerToken)) {
-    return errorResponse(400, "MISSING_REQUIRED_HEADER", "partnerToken header is required and must be a valid UUID");
-  }
+function validateHeaders(requestId) {
   if (requestId !== null && requestId !== undefined && !isValidUUID4(requestId)) {
     return errorResponse(400, "INVALID_HEADER", "requestId header must be a valid UUID");
   }
   return null;
 }
 
-function validateAuth(partnerToken, authorization, requestId) {
-  if (authorization) {
-    if (!String(authorization).toLowerCase().startsWith("bearer ")) {
-      return errorResponse(401, "INVALID_TOKEN", "Authorization header must be a Bearer token");
-    }
-    const token = String(authorization).split(/\s+/, 2)[1];
-    const verification = verifyJwt(token);
-    if (!verification.valid) return verification.error;
-    if (requestId !== null && requestId !== undefined && !isValidUUID4(requestId)) {
-      return errorResponse(400, "INVALID_HEADER", "requestId header must be a valid UUID");
-    }
-    return null;
+function validateAuth(authorization, requestId) {
+  if (!authorization) {
+    return errorResponse(401, "MISSING_REQUIRED_HEADER", "Authorization header is required and must be a Bearer token");
   }
-
-  return validateHeaders(partnerToken, requestId);
+  if (!String(authorization).toLowerCase().startsWith("bearer ")) {
+    return errorResponse(401, "INVALID_TOKEN", "Authorization header must be a Bearer token");
+  }
+  const token = String(authorization).split(/\s+/, 2)[1];
+  const verification = verifyJwt(token);
+  if (!verification.valid) return verification.error;
+  if (requestId !== null && requestId !== undefined && !isValidUUID4(requestId)) {
+    return errorResponse(400, "INVALID_HEADER", "requestId header must be a valid UUID");
+  }
+  return null;
 }
 
 const CUSTOMERS_RESPONSE = [
@@ -311,7 +307,6 @@ exports.handler = async (event) => {
 
   const path = event.path || "/";
   const headers = event.headers || {};
-  const partnerToken = getHeader(headers, "partnerToken");
   const requestId = getHeader(headers, "requestId");
   const authorization = getHeader(headers, "Authorization");
 
@@ -331,7 +326,7 @@ exports.handler = async (event) => {
     });
   }
 
-  const authError = validateAuth(partnerToken, authorization, requestId);
+  const authError = validateAuth(authorization, requestId);
   if (authError) return authError;
 
   if (method === "GET" && path === "/dpp/v1/customers") {

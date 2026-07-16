@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import jwt
 import uvicorn
-from fastapi import Body, FastAPI, Header, Request, Form
+from fastapi import Body, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -23,7 +23,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "partnerToken", "requestId", "Content-Type"],
+    allow_headers=["Authorization", "requestId", "Content-Type"],
 )
 
 
@@ -50,13 +50,7 @@ def _is_valid_uuid4(value: str) -> bool:
     return parsed.version == 4
 
 
-def _validate_headers(partner_token: str | None, request_id: str | None) -> str | None:
-    if not partner_token or not _is_valid_uuid4(partner_token):
-        raise APIError(
-            400,
-            "MISSING_REQUIRED_HEADER",
-            "partnerToken header is required and must be a valid UUID",
-        )
+def _validate_headers(request_id: str | None) -> str | None:
     if request_id is not None and not _is_valid_uuid4(request_id):
         raise APIError(
             400,
@@ -85,18 +79,20 @@ def _verify_jwt_token(token: str) -> dict:
         raise APIError(401, "INVALID_TOKEN", "Access token is invalid")
 
 
-def _validate_auth(partner_token: str | None, authorization: str | None, request_id: str | None) -> str | None:
-    # If Authorization header provided, accept Bearer JWT tokens instead of partnerToken
-    if authorization:
-        if not authorization.lower().startswith("bearer "):
-            raise APIError(401, "INVALID_TOKEN", "Authorization header must be a Bearer token")
-        token = authorization.split(None, 1)[1]
-        _verify_jwt_token(token)
-        if request_id is not None and not _is_valid_uuid4(request_id):
-            raise APIError(400, "INVALID_HEADER", "requestId header must be a valid UUID")
-        return request_id
-    # fallback to original header validation
-    return _validate_headers(partner_token, request_id)
+def _validate_auth(authorization: str | None, request_id: str | None) -> str | None:
+    if not authorization:
+        raise APIError(
+            401,
+            "MISSING_REQUIRED_HEADER",
+            "Authorization header is required and must be a Bearer token",
+        )
+    if not authorization.lower().startswith("bearer "):
+        raise APIError(401, "INVALID_TOKEN", "Authorization header must be a Bearer token")
+    token = authorization.split(None, 1)[1]
+    _verify_jwt_token(token)
+    if request_id is not None and not _is_valid_uuid4(request_id):
+        raise APIError(400, "INVALID_HEADER", "requestId header must be a valid UUID")
+    return request_id
 
 
 CUSTOMERS_RESPONSE = [
@@ -260,32 +256,29 @@ async def not_found_handler(_: Request, exc: StarletteHTTPException):
 
 @app.get("/dpp/v1/customers")
 async def get_customers(
-    partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    _validate_auth(partner_token, authorization, request_id)
+    _validate_auth(authorization, request_id)
     return JSONResponse(content=CUSTOMERS_RESPONSE)
 
 
 @app.get("/dpp/v1/emv/devices")
 async def get_devices(
-    partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    _validate_auth(partner_token, authorization, request_id)
+    _validate_auth(authorization, request_id)
     return JSONResponse(content=DEVICES_RESPONSE)
 
 
 @app.post("/dpp/v1/payments")
 async def post_payments(
     payload: dict[str, Any] = Body(...),
-    partner_token: str | None = Header(None, alias="partnerToken"),
     request_id: str | None = Header(None, alias="requestId"),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    request_id = _validate_auth(partner_token, authorization, request_id)
+    request_id = _validate_auth(authorization, request_id)
 
     payment_type = payload.get("paymentType")
     if payment_type is None:
@@ -331,14 +324,25 @@ async def post_payments(
 
 
 @app.post("/dpp/v1/auth/token")
-async def auth_token(request: Request, client_id: str | None = Form(None), client_secret: str | None = Form(None), body: dict | None = Body(None)):
+async def auth_token(request: Request):
     # Accept both form-encoded (OAuth2) and JSON bodies for demo client-credentials
-    data = {}
-    if client_id or client_secret:
-        data["clientId"] = client_id
-        data["clientSecret"] = client_secret
-    if body:
-        data.update(body)
+    raw_body = await request.body()
+    content_type = (request.headers.get("content-type") or "").lower()
+    data: dict[str, Any] = {}
+
+    if raw_body:
+        text_body = raw_body.decode("utf-8")
+        if "application/x-www-form-urlencoded" in content_type:
+            from urllib.parse import parse_qs
+
+            parsed = parse_qs(text_body)
+            data = {key: values[0] for key, values in parsed.items() if values}
+        else:
+            try:
+                data = json.loads(text_body)
+            except Exception:
+                data = {}
+
     client_id = data.get("clientId") or data.get("client_id")
     client_secret = data.get("clientSecret") or data.get("client_secret")
     if client_id != "demo-client" or client_secret != "demo-secret":
